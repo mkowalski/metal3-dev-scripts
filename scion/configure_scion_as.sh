@@ -72,4 +72,170 @@ for as in a b; do
     done
 done
 
-# --- (continued in later plan tasks) ---
+# --- service configurations -------------------------------------------------
+for as in a b; do
+    cat > "${SCION_DIR}/as-${as}/cs.toml" <<EOF
+[general]
+id = "cs$(var="SCION_IA_${as^^}_US"; echo "${!var}")-1"
+config_dir = "/etc/scion"
+
+[trust_db]
+connection = "/var/lib/scion/cs.trust.db"
+[beacon_db]
+connection = "/var/lib/scion/cs.beacon.db"
+[path_db]
+connection = "/var/lib/scion/cs.path.db"
+EOF
+    cat > "${SCION_DIR}/as-${as}/br.toml" <<EOF
+[general]
+id = "br$(var="SCION_IA_${as^^}_US"; echo "${!var}")-1"
+config_dir = "/etc/scion"
+EOF
+done
+
+# AS A also runs a shim dispatcher: it answers SCMP echo/traceroute for the
+# host address (the router only forwards them to the endhost port 30041),
+# which the control-plane smoke probe and dataplane tests rely on.
+cat > "${SCION_DIR}/as-a/dispatcher.toml" <<EOF
+[dispatcher]
+id = "dispatcher${SCION_IA_A_US}"
+underlay_addr = "${SCION_HOST_IP}"
+local_udp_forwarding = true
+EOF
+
+# AS B extras: scion-daemon + SCION-IP gateway (the "remote site").
+cat > "${SCION_DIR}/as-b/daemon.toml" <<EOF
+[general]
+id = "sd${SCION_IA_B_US}"
+config_dir = "/etc/scion"
+
+[sd]
+address = "127.0.0.1:32255"
+
+[path_db]
+connection = "/var/lib/scion/sd.path.db"
+[trust_db]
+connection = "/var/lib/scion/sd.trust.db"
+EOF
+
+# ctrl/data/probe_addr key names verified against scion v0.15.0
+# gateway/config/config.go (Gateway struct toml tags).
+cat > "${SCION_DIR}/as-b/sig.toml" <<EOF
+[gateway]
+id = "sig${SCION_IA_B_US}-1"
+traffic_policy_file = "/etc/scion/sig-traffic.json"
+ip_routing_policy_file = "/etc/scion/sig-routing.policy"
+ctrl_addr = "${SCION_HOST_IP}:32256"
+data_addr = "${SCION_HOST_IP}:32056"
+probe_addr = "${SCION_HOST_IP}:32856"
+
+[sciond_connection]
+address = "127.0.0.1:32255"
+
+[tunnel]
+name = "sigb"
+EOF
+
+# Traffic policy: prefixes AS B may send toward AS A (the cluster).
+# Default: external subnet + OVN-K default cluster network.
+CLUSTER_PREFIXES="${SCION_CLUSTER_PREFIXES:-${EXTERNAL_SUBNET_V4},10.128.0.0/14}"
+# shellcheck disable=SC2086  # intentional word splitting of the prefix list
+nets_json=$(printf '"%s",' ${CLUSTER_PREFIXES//,/ }); nets_json="[${nets_json%,}]"
+cat > "${SCION_DIR}/as-b/sig-traffic.json" <<EOF
+{ "ConfigVersion": 1, "ASes": { "${SCION_ISD_AS_A}": { "Nets": ${nets_json} } } }
+EOF
+
+# Routing policy: advertise the remote prefix to AS A, accept cluster
+# prefixes from AS A. Format per gateway/routing/doc.go:
+# <action> <from-ia> <to-ia> <prefixes>.
+{
+    echo "advertise ${SCION_ISD_AS_B} ${SCION_ISD_AS_A} ${SCION_REMOTE_PREFIX}"
+    echo "accept    ${SCION_ISD_AS_A} ${SCION_ISD_AS_B} ${CLUSTER_PREFIXES}"
+} > "${SCION_DIR}/as-b/sig-routing.policy"
+
+# --- registrar token ---------------------------------------------------------
+if [[ -z "${SCION_REGISTRAR_TOKEN}" ]]; then
+    if [[ ! -f "${SCION_DIR}/token" ]]; then
+        head -c16 /dev/urandom | base64 | tr -d '=+/' | sudo tee "${SCION_DIR}/token" >/dev/null
+    fi
+    SCION_REGISTRAR_TOKEN="$(sudo cat "${SCION_DIR}/token")"
+else
+    echo "${SCION_REGISTRAR_TOKEN}" | sudo tee "${SCION_DIR}/token" >/dev/null
+fi
+
+# --- remote ping target ------------------------------------------------------
+# Dummy interface on the host carrying an address from SCION_REMOTE_PREFIX;
+# sig-b routes the prefix through its tun.
+REMOTE_PING_IP="$(nth_ip "${SCION_REMOTE_PREFIX}" 1)"
+sudo ip link add scion-remote type dummy 2>/dev/null || true
+sudo ip addr replace "${REMOTE_PING_IP}/${SCION_REMOTE_PREFIX#*/}" dev scion-remote
+sudo ip link set scion-remote up
+
+# --- containers ---------------------------------------------------------------
+run_scion() { # name entrypoint config-dir extra-args... -- binary-args...
+    local name="$1" entry="$2" conf="$3"; shift 3
+    local extra=(); while [[ "$1" != "--" ]]; do extra+=("$1"); shift; done; shift
+    sudo podman run -d --replace --name "${name}" --net host \
+        -v "${conf}:/etc/scion:z" -v "${name}-state:/var/lib/scion" \
+        "${extra[@]}" --entrypoint "${entry}" "${SCION_IMAGE}" "$@"
+}
+
+run_scion scion-cs-a scion-control "${SCION_DIR}/as-a" -- --config /etc/scion/cs.toml
+run_scion scion-br-a scion-router  "${SCION_DIR}/as-a" -- --config /etc/scion/br.toml
+run_scion scion-dispatcher-a scion-dispatcher "${SCION_DIR}/as-a" -- --config /etc/scion/dispatcher.toml
+run_scion scion-cs-b scion-control "${SCION_DIR}/as-b" -- --config /etc/scion/cs.toml
+run_scion scion-br-b scion-router  "${SCION_DIR}/as-b" -- --config /etc/scion/br.toml
+run_scion scion-daemon-b scion-daemon "${SCION_DIR}/as-b" -- --config /etc/scion/daemon.toml
+run_scion scion-sig-b scion-ip-gateway "${SCION_DIR}/as-b" \
+    --privileged -v /dev/net/tun:/dev/net/tun -- --config /etc/scion/sig.toml
+
+# serve-discovery.py argv is GEN TRCS [PORT]; GEN must contain topology.json
+# and TRCS the ISD*-B*-S*.trc files — as-a/ and as-a/certs/ match that layout.
+sudo podman run -d --replace --name scion-discovery --net host \
+    -v "${SCION_DIR}/as-a:/data:z" --entrypoint python3 "${SCION_IMAGE}" \
+    /usr/local/bin/serve-discovery.py /data /data/certs 8041
+
+# The registrar rewrites as-a's topology.json (adds node SIG entries) and then
+# runs -reload-cmd; its systemctl default cannot work in a container, so we
+# HUP the control service through the podman REST API over the host socket.
+sudo systemctl enable --now podman.socket
+sudo podman run -d --replace --name scion-registrar --net host \
+    -v "${SCION_DIR}/as-a:/data:z" \
+    -v /run/podman/podman.sock:/run/podman/podman.sock \
+    -e "REGISTRAR_TOKEN=${SCION_REGISTRAR_TOKEN}" \
+    --entrypoint scion-registrar "${SCION_IMAGE}" \
+    -topology /data/topology.json -listen :8642 \
+    -reload-cmd "curl -fsS --unix-socket /run/podman/podman.sock -X POST http://d/containers/scion-cs-a/kill?signal=SIGHUP"
+
+# --- firewall -----------------------------------------------------------------
+SCION_UDP_PORTS=(30041 31000 31002 31020 32000 32002 32020 32056 32256 32856)
+for p in "${SCION_UDP_PORTS[@]}"; do
+    sudo firewall-cmd --zone=libvirt --permanent --add-port="${p}/udp"
+    sudo firewall-cmd --zone=libvirt --add-port="${p}/udp" || true
+done
+for p in 31000 32000 8041 8642; do
+    sudo firewall-cmd --zone=libvirt --permanent --add-port="${p}/tcp"
+    sudo firewall-cmd --zone=libvirt --add-port="${p}/tcp" || true
+done
+
+# --- smoke checks --------------------------------------------------------------
+sleep 5
+curl -fsS "http://${SCION_HOST_IP}:8041/topology" | grep -q "${SCION_ISD_AS_A}"
+# no -f: a 401 status is the expected outcome here
+curl -sS -o /dev/null -w '%{http_code}' "http://${SCION_HOST_IP}:8642/v1/sigs" | grep -q 401
+curl -fsS -H "Authorization: Bearer ${SCION_REGISTRAR_TOKEN}" "http://${SCION_HOST_IP}:8642/v1/sigs" >/dev/null
+for c in scion-cs-a scion-br-a scion-dispatcher-a scion-cs-b scion-br-b scion-daemon-b scion-sig-b scion-discovery scion-registrar; do
+    sudo podman inspect -f '{{.State.Running}}' "$c" | grep -q true
+done
+# NOTE: the sigb tun is NOT checked here on purpose: the gateway creates it
+# lazily, on the first routing chain toward a remote gateway, i.e. only once
+# a cluster node has registered a SIG in AS A via the registrar.
+
+cat <<EOF
+SCION topology ready:
+  DISCOVERY_URL=http://${SCION_HOST_IP}:8041
+  REGISTRAR_URL=http://${SCION_HOST_IP}:8642
+  REGISTRAR_TOKEN=${SCION_REGISTRAR_TOKEN}
+  REMOTE_ISD_AS=${SCION_ISD_AS_B}
+  REMOTE_PING_IP=${REMOTE_PING_IP}
+EOF

@@ -4,9 +4,15 @@ FROM docker.io/library/golang:1.26 AS scion-build
 ARG SCION_VERSION=v0.15.0
 RUN git clone --depth 1 -b ${SCION_VERSION} https://github.com/scionproto/scion /src
 WORKDIR /src
-RUN CGO_ENABLED=0 go build -o /out/scion-control ./control/cmd/control && \
+# control and daemon need cgo: their sqlite storage backend (go-sqlite3)
+# is a stub without it. Link them statically (netgo/osusergo) so the
+# binaries run on the ubi9 glibc, which is older than the builder's.
+RUN CGO_ENABLED=1 go build -tags netgo,osusergo -ldflags '-extldflags "-static"' \
+        -o /out/scion-control ./control/cmd/control && \
+    CGO_ENABLED=1 go build -tags netgo,osusergo -ldflags '-extldflags "-static"' \
+        -o /out/scion-daemon ./daemon/cmd/daemon && \
     CGO_ENABLED=0 go build -o /out/scion-router ./router/cmd/router && \
-    CGO_ENABLED=0 go build -o /out/scion-daemon ./daemon/cmd/daemon && \
+    CGO_ENABLED=0 go build -o /out/scion-dispatcher ./dispatcher/cmd/dispatcher && \
     CGO_ENABLED=0 go build -o /out/scion-ip-gateway ./gateway/cmd/gateway && \
     CGO_ENABLED=0 go build -o /out/scion-pki ./scion-pki/cmd/scion-pki && \
     CGO_ENABLED=0 go build -o /out/scion ./scion/cmd/scion
