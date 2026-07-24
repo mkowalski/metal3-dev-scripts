@@ -241,6 +241,29 @@ set -x
 # FRR container image:
 #export BGP_TOR_IMAGE=quay.io/frrouting/frr:9.1.0
 
+# ENABLE_SCION_AS -
+# Deploy a local two-AS SCION topology on the host (control services,
+# border routers, a remote SCION-IP gateway, a bootstrap discovery
+# server and the scion-k8s-operator registrar), so cluster nodes can
+# join the SCION network as endhosts via scion-k8s-operator
+# (https://github.com/mkowalski/scion-k8s-operator). The SCION
+# infrastructure image is built locally with podman at configure time.
+#export ENABLE_SCION_AS=true
+#
+# scionproto/scion tag to build; must match the version embedded in
+# scion-k8s-operator.
+#export SCION_VERSION=v0.15.0
+#
+# scion-k8s-operator git ref for the registrar binary.
+#export SCION_OPERATOR_REF=main
+#
+# ISD-AS numbers for the cluster-side AS and the simulated remote AS.
+#export SCION_ISD_AS_A=1-ff00:0:110
+#export SCION_ISD_AS_B=1-ff00:0:111
+#
+# Prefix behind the remote SIG (ping target for SCION dataplane tests).
+#export SCION_REMOTE_PREFIX=192.168.100.0/24
+
 # PERSISTENT_IMAGEREG
 # Default: false
 # Enables dev-scripts to setup and use nfs on the host as persistent storage

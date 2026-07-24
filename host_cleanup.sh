@@ -89,3 +89,6 @@ lldp/cleanup_lldp_tor.sh
 
 # Remove the optional top-of-rack BGP speaker
 bgp/cleanup_bgp_tor.sh || true
+
+# Remove the optional local SCION topology
+scion/cleanup_scion_as.sh || true

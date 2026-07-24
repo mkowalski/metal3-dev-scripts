@@ -522,3 +522,8 @@ fi
 if [[ -n "${ENABLE_BGP_TOR:-}" ]]; then
     bgp/configure_bgp_tor.sh
 fi
+
+# Optionally deploy a local two-AS SCION topology on the host
+if [[ -n "${ENABLE_SCION_AS:-}" ]]; then
+    scion/configure_scion_as.sh
+fi
