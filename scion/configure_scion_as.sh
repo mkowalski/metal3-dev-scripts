@@ -7,6 +7,9 @@ source "${scion_dir}/../common.sh"
 # shellcheck disable=SC1091
 source "${scion_dir}/../network.sh"
 
+[[ -n "${EXTERNAL_SUBNET_V4:-}" ]] || \
+    { echo "ENABLE_SCION_AS requires an IPv4 external subnet (IP_STACK=v4 or v4v6)" >&2; exit 1; }
+
 # Deploys a local two-AS SCION topology on the host: control services,
 # border routers, a remote SCION-IP gateway, a bootstrap discovery server
 # and the scion-k8s-operator registrar. Cluster nodes join AS A as SCION
