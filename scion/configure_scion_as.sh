@@ -162,6 +162,7 @@ if [[ -z "${SCION_REGISTRAR_TOKEN}" ]]; then
 else
     echo "${SCION_REGISTRAR_TOKEN}" | sudo tee "${SCION_DIR}/token" >/dev/null
 fi
+sudo chmod 600 "${SCION_DIR}/token"
 
 # --- remote ping target ------------------------------------------------------
 # Dummy interface on the host carrying an address from SCION_REMOTE_PREFIX;
@@ -191,6 +192,8 @@ run_scion scion-sig-b scion-ip-gateway "${SCION_DIR}/as-b" \
 
 # serve-discovery.py argv is GEN TRCS [PORT]; GEN must contain topology.json
 # and TRCS the ISD*-B*-S*.trc files — as-a/ and as-a/certs/ match that layout.
+# It has no bind-address argument (binds all interfaces); firewalld restricts
+# reachability to the libvirt zone.
 sudo podman run -d --replace --name scion-discovery --net host \
     -v "${SCION_DIR}/as-a:/data:z" --entrypoint python3 "${SCION_IMAGE}" \
     /usr/local/bin/serve-discovery.py /data /data/certs 8041
@@ -198,16 +201,21 @@ sudo podman run -d --replace --name scion-discovery --net host \
 # The registrar rewrites as-a's topology.json (adds node SIG entries) and then
 # runs -reload-cmd; its systemctl default cannot work in a container, so we
 # HUP the control service through the podman REST API over the host socket.
+# Mounting the podman socket grants the registrar root-equivalent control of
+# the host; acceptable for dev-scripts only.
 sudo systemctl enable --now podman.socket
 sudo podman run -d --replace --name scion-registrar --net host \
     -v "${SCION_DIR}/as-a:/data:z" \
     -v /run/podman/podman.sock:/run/podman/podman.sock \
     -e "REGISTRAR_TOKEN=${SCION_REGISTRAR_TOKEN}" \
     --entrypoint scion-registrar "${SCION_IMAGE}" \
-    -topology /data/topology.json -listen :8642 \
+    -topology /data/topology.json -listen "${SCION_HOST_IP}:8642" \
     -reload-cmd "curl -fsS --unix-socket /run/podman/podman.sock -X POST http://d/containers/scion-cs-a/kill?signal=SIGHUP"
 
 # --- firewall -----------------------------------------------------------------
+# Permanent adds are strict (a failure means broken firewalld config); the
+# runtime adds get || true because re-adding an active port is a warning-level
+# failure on some firewalld versions and the rule is already in effect.
 SCION_UDP_PORTS=(30041 31000 31002 31020 32000 32002 32020 32056 32256 32856)
 for p in "${SCION_UDP_PORTS[@]}"; do
     sudo firewall-cmd --zone=libvirt --permanent --add-port="${p}/udp"
@@ -219,7 +227,12 @@ for p in 31000 32000 8041 8642; do
 done
 
 # --- smoke checks --------------------------------------------------------------
-sleep 5
+# Bounded wait for the discovery server to come up (also covers the other
+# containers, which start earlier).
+for _ in $(seq 12); do
+    curl -fsS "http://${SCION_HOST_IP}:8041/topology" | grep -q "${SCION_ISD_AS_A}" && break
+    sleep 5
+done
 curl -fsS "http://${SCION_HOST_IP}:8041/topology" | grep -q "${SCION_ISD_AS_A}"
 # no -f: a 401 status is the expected outcome here
 curl -sS -o /dev/null -w '%{http_code}' "http://${SCION_HOST_IP}:8642/v1/sigs" | grep -q 401
