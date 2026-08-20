@@ -118,7 +118,7 @@ connection = "/var/lib/scion/sd.path.db"
 connection = "/var/lib/scion/sd.trust.db"
 EOF
 
-# ctrl/data/probe_addr key names verified against scion v0.15.0
+# ctrl/data/probe_addr key names verified against scion v0.15.1
 # gateway/config/config.go (Gateway struct toml tags).
 cat > "${SCION_DIR}/as-b/sig.toml" <<EOF
 [gateway]

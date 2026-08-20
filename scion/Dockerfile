@@ -1,7 +1,7 @@
 # SCION infrastructure image for the dev-scripts local SCION topology.
 # Built locally at configure time; never pushed to a registry.
 FROM docker.io/library/golang:1.26 AS scion-build
-ARG SCION_VERSION=v0.15.0
+ARG SCION_VERSION=v0.15.1
 RUN git clone --depth 1 -b ${SCION_VERSION} https://github.com/scionproto/scion /src
 WORKDIR /src
 # control and daemon need cgo: their sqlite storage backend (go-sqlite3)

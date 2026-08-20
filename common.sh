@@ -724,7 +724,7 @@ export BGP_TOR_IMAGE=${BGP_TOR_IMAGE:-quay.io/frrouting/frr:9.1.0}
 # Optional local two-AS SCION topology on the host
 # (see config_example.sh)
 export ENABLE_SCION_AS=${ENABLE_SCION_AS:-}
-export SCION_VERSION=${SCION_VERSION:-v0.15.0}
+export SCION_VERSION=${SCION_VERSION:-v0.15.1}
 export SCION_OPERATOR_REF=${SCION_OPERATOR_REF:-main}
 export SCION_ISD_AS_A=${SCION_ISD_AS_A:-1-ff00:0:110}
 export SCION_ISD_AS_B=${SCION_ISD_AS_B:-1-ff00:0:111}

@@ -252,7 +252,7 @@ set -x
 #
 # scionproto/scion tag to build; must match the version embedded in
 # scion-k8s-operator.
-#export SCION_VERSION=v0.15.0
+#export SCION_VERSION=v0.15.1
 #
 # scion-k8s-operator git ref for the registrar binary.
 #export SCION_OPERATOR_REF=main
