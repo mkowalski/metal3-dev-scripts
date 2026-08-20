@@ -242,28 +242,29 @@ set -x
 #export BGP_TOR_IMAGE=quay.io/frrouting/frr:9.1.0
 
 # ENABLE_SCION_AS -
-# Deploy a local two-AS SCION topology on the host (control services,
-# border routers, a remote SCION-IP gateway, a bootstrap discovery
-# server and the scion-k8s-operator registrar), so cluster nodes can
-# join the SCION network as endhosts via scion-k8s-operator
-# (https://github.com/mkowalski/scion-k8s-operator). The SCION
-# infrastructure image is built locally with podman at configure time.
+# Deploy the path-conclusive local two-AS SCION v0.15.1 topology: control
+# services, border routers, AS A dispatcher, AS B daemon/SIG, discovery,
+# registrar, and a guarded remote ICMP/TCP target. The SCION infrastructure
+# image is built locally. Cluster workloads are installed separately by
+# scion-k8s-operator (https://github.com/mkowalski/scion-k8s-operator).
 #export ENABLE_SCION_AS=true
 #
-# scionproto/scion tag to build; must match the version embedded in
-# scion-k8s-operator.
+# scionproto tag; bump together with scion-k8s-operator.
 #export SCION_VERSION=v0.15.1
 #
-# scion-k8s-operator git ref for the registrar binary.
+# scion-k8s-operator ref used to build the registrar.
 #export SCION_OPERATOR_REF=main
 #
-# ISD-AS numbers for the cluster-side AS and the simulated remote AS.
+# Cluster-side and simulated remote ISD-AS numbers.
 #export SCION_ISD_AS_A=1-ff00:0:110
 #export SCION_ISD_AS_B=1-ff00:0:111
 #
-# Prefix behind the remote SIG (ping target for SCION dataplane tests).
+# Prefix behind SIG-B. The first address is the guarded ICMP/TCP target.
 #export SCION_REMOTE_PREFIX=192.168.100.0/24
-# Pod prefixes accepted by the remote SIG and used for return routing.
+#
+# Pod prefixes accepted by SIG-B and routed back through SCION. Do not include
+# the machine/node-to-AS underlay; the operator CR lists that network in
+# acceptPolicy.underlayCIDRs instead.
 #export SCION_CLUSTER_PREFIXES=10.128.0.0/14
 
 # PERSISTENT_IMAGEREG

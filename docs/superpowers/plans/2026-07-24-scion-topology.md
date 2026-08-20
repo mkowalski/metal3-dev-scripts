@@ -1,5 +1,13 @@
 # dev-scripts SCION Topology Implementation Plan
 
+> **Archived implementation record.** The original task text below preserves
+> v0.15.0 assumptions and intermediate container counts. The as-built branch is
+> `scion-topology` at `b3a9137`: SCION v0.15.1, ten containers, a path-conclusive
+> nftables guard, TCP target, and AS-control policy route. Current operation is
+> documented in the repository README/config example and the companion
+> scion-k8s-operator as-built topology design. Do not use the old snippets below
+> as a runbook.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `ENABLE_SCION_AS=true` makes dev-scripts stand up a complete two-AS SCION topology on the hypervisor host (control services, border routers, remote SIG, discovery server, scion-registrar) so the virtualized cluster's nodes can join as SCION endhosts via scion-k8s-operator, per `docs/superpowers/specs/2026-07-24-dev-scripts-scion-topology-design.md` in github.com/mkowalski/scion-k8s-operator.
@@ -597,31 +605,30 @@ sudo rm -rf "${WORKING_DIR}/scion"
 **Files:**
 - Modify: none new (fixes as discovered)
 
-- [x] **Step 1: consumer flow.** With a dev-scripts cluster up and the topology configured: deploy scion-k8s-operator into the cluster (`oc apply -k config/manifests` from that repo, images pushed to the dev-scripts local registry), apply a ScionNetwork using the handoff values, then run that repo's `test/e2e/e2e_test.sh` with `DISCOVERY_URL/REGISTRAR_URL/REGISTRAR_TOKEN/REMOTE_ISD_AS/REMOTE_PING_IP` from the handoff block. This is the first live execution of the operator's dataplane; expect iteration — fix root causes in whichever repo owns them (topology/plumbing here; agent/operator bugs get fixed and committed in scion-k8s-operator).
-  - DONE 2026-07-24: all e2e phases green (deploy/configure/assert_agents/assert_dataplane/assert_registration/churn/undeploy) on ostest. 11 commits of fixes on scion-k8s-operator `live-e2e-fixes` (privileged agent, CGO agent image, metrics-registration crash, scion logging, traffic-policy Nets, tun forwarding sysctl, registrar-deregistration finalizer, e2e script fixes). No dev-scripts topology changes were needed. Caveats: outbound pod ping is a false positive for the SCION path on OVN-K shared gateway (egress bypasses host routes); inbound remote→pod verified genuinely via SCION. sig-b hit an upstream scionproto ClearSession panic under churn (restart recovers).
-- [x] **Step 2: record results.** Update scion-k8s-operator `docs/known-gaps.md` (retire the live-run items that now pass; add anything newly discovered). Commit there separately.
-  - DONE: `docs/known-gaps.md` rewritten on `live-e2e-fixes` (commit 48094a6).
-- [ ] **Step 3: PR prep in the fork.** `git log --oneline` review; squash fixups if messy; push `scion-topology` to `origin` (mkowalski/dev-scripts). Do NOT open an upstream PR without explicit approval.
+- [x] **Step 1: consumer flow.** Final validation completed 2026-08-20 against
+  five-node OpenShift 5.0 with SCION v0.15.1. The hardened suite proved
+  destination-only routing, source preservation, TCP/ICMP, registration,
+  churn, and cleanup; the earlier shared-gateway false positive is retired.
+- [x] **Step 2: record results.** Operator design, handoff, known gaps, install,
+  e2e guide, and diagrams updated.
+- [x] **Step 3: fork branch pushed.** Commit `b3a9137`; upstream PR still
+  requires explicit approval.
 
 ---
 
-## Self-review notes
+## Final as-built review
 
-- **Spec coverage**: toggle/config vars (T1), locally-built image incl.
-  registrar + discovery (T2), templated topologies + testcrypto (T3-4),
-  seven+ containers/firewall/smoke/handoff (T5), dummy-interface ping target
-  (T5), idempotent cleanup (T6), consumer-flow validation (T7). Spec's
-  "seven containers" is actually **eight** (scion-daemon-b was discovered
-  during research: the stock gateway requires a sciond) — spec deviation to
-  note in the spec when implementing.
-- **Executor verification points** (marked in tasks): scionproto cmd paths at
-  the tag (T2), `go install` of the registrar module (T2), testcrypto output
-  dir naming (T4), serve-discovery argv layout (T5), registrar reload
-  mechanism — podman socket vs host systemd-run fallback (T5), sig.toml key
-  names for ctrl/data/probe addrs (T5 — verify against
-  `gateway/config/config.go:100-110`; the gateway may derive some addrs from
-  topology.json `sigs` instead of its toml — if so, drop them from sig.toml),
-  UDP/TCP port trim (T5).
-- **Biggest risk concentration**: Task 5 Step 4 (live two-AS bring-up) —
-  deliberately structured as an iterate-until-green step with the `scion
-  ping` control-plane probe before any cluster involvement.
+- Ten long-running containers: seven SCION stateful services plus discovery,
+  registrar, and the remote TCP endpoint.
+- SCION v0.15.1 is pinned with the operator; state volumes are reset before
+  regenerated trust material is consumed.
+- The remote target cannot be reached over the plain underlay because
+  `inet scion-e2e` accepts it only from `sigb`.
+- SIG-B accepts pod prefixes only. AS-host control replies use test-owned
+  rule/table 31050 to stay on the underlay; remote-target replies use SCION.
+- Cleanup mirrors every container, volume, firewall source, nftables table,
+  policy rule/table, dummy interface, and tun created by configure.
+- The five-node OpenShift 5.0 suite passed destination routing, unchanged
+  sources, TCP/ICMP, registration, churn, and full teardown on 2026-08-20.
+- Branch `scion-topology` is pushed at `b3a9137`; opening an upstream PR remains
+  an explicit project-owner decision.

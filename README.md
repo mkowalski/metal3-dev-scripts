@@ -245,6 +245,44 @@ After running `make infra_only`, you can deploy OpenShift using your own tooling
 
 To clean up the infrastructure, use `make clean`.
 
+## Local SCION topology
+
+The `scion-topology` branch can run a two-AS SCION v0.15.1 environment on the
+hypervisor for scion-k8s-operator end-to-end tests. Enable it in your config:
+
+```sh
+export ENABLE_SCION_AS=true
+export SCION_VERSION=v0.15.1
+export SCION_CLUSTER_PREFIXES=10.128.0.0/14
+```
+
+`02_configure_host.sh` invokes `scion/configure_scion_as.sh`. The script builds
+one local infrastructure image and starts ten host-network containers: the two
+control services and border routers, AS A's dispatcher, AS B's daemon and SIG,
+the discovery server, registrar, and remote TCP target. It prints the values
+required by scion-k8s-operator's `test/e2e/e2e_test.sh`.
+
+The topology separates test data from AS control traffic:
+
+- `inet scion-e2e` blocks direct-underlay access to the remote target;
+- SIG-B accepts only `SCION_CLUSTER_PREFIXES`;
+- rule/table 31050 returns traffic sourced by the AS host over the original
+  underlay, while remote-target traffic returns through `sigb`;
+- the operator CR must set `acceptPolicy.underlayCIDRs` to the external
+  node-to-AS subnet (normally `192.168.111.0/24`).
+
+Manual lifecycle:
+
+```sh
+CONFIG=config_$USER.sh scion/configure_scion_as.sh
+CONFIG=config_$USER.sh scion/cleanup_scion_as.sh
+```
+
+Cleanup removes all test-owned containers, volumes, firewall sources,
+rule/table 31050, `inet scion-e2e`, and tun/dummy interfaces. The feature is
+IPv4 data-plane only; `IP_STACK=v4v6` is supported because the IPv4 attachment
+remains available.
+
 ## Interacting with the deployed cluster
 
 Consider `export KUBECONFIG=<path-to-config>` to avoid using the `--kubeconfig` flag on each command.
