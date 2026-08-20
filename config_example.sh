@@ -263,6 +263,8 @@ set -x
 #
 # Prefix behind the remote SIG (ping target for SCION dataplane tests).
 #export SCION_REMOTE_PREFIX=192.168.100.0/24
+# Pod prefixes accepted by the remote SIG and used for return routing.
+#export SCION_CLUSTER_PREFIXES=10.128.0.0/14
 
 # PERSISTENT_IMAGEREG
 # Default: false

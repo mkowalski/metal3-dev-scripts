@@ -10,7 +10,7 @@ source "${scion_dir}/../common.sh"
 # scion-registrar do not.
 SCION_STATE_CONTAINERS=(scion-cs-a scion-br-a scion-dispatcher-a scion-cs-b
                         scion-br-b scion-daemon-b scion-sig-b)
-for c in "${SCION_STATE_CONTAINERS[@]}" scion-discovery scion-registrar; do
+for c in "${SCION_STATE_CONTAINERS[@]}" scion-discovery scion-registrar scion-remote-echo; do
     sudo podman rm -f "$c" || true
 done
 for c in "${SCION_STATE_CONTAINERS[@]}"; do
@@ -29,6 +29,17 @@ for p in 31000 32000 8041 8642; do
     sudo firewall-cmd --zone=libvirt --permanent --remove-port="${p}/tcp" || true
     sudo firewall-cmd --zone=libvirt --remove-port="${p}/tcp" || true
 done
+IFS=',' read -ra cluster_prefixes <<< "${SCION_CLUSTER_PREFIXES}"
+for prefix in "${cluster_prefixes[@]}"; do
+    sudo firewall-cmd --zone=trusted --permanent --remove-source="${prefix}" || true
+    sudo firewall-cmd --zone=trusted --remove-source="${prefix}" || true
+done
+SCION_CONTROL_ROUTE_TABLE=31050
+sudo ip rule del priority "${SCION_CONTROL_ROUTE_TABLE}" 2>/dev/null || true
+sudo ip route flush table "${SCION_CONTROL_ROUTE_TABLE}" 2>/dev/null || true
+
+# Remove only the test-owned underlay-bypass guard.
+sudo nft delete table inet scion-e2e 2>/dev/null || true
 
 sudo ip link del scion-remote 2>/dev/null || true
 sudo ip link del sigb 2>/dev/null || true   # sig tun should die with the
