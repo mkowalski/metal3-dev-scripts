@@ -268,7 +268,9 @@ The topology separates test data from AS control traffic:
 - SIG-B accepts only `SCION_CLUSTER_PREFIXES`;
 - the registrar serves HTTPS with a self-signed certificate kept in
   `${WORKING_DIR}/scion/registrar-tls/`; pass the printed `REGISTRAR_CA` path
-  to the e2e suite so the operator pins it;
+  to the e2e suite so the operator pins it (needs scion-k8s-operator at
+  `d4f1ee9` or later; older suites ignore `REGISTRAR_CA` and cannot verify
+  the certificate);
 - rule/table 31050 returns traffic sourced by the AS host over the original
   underlay, while remote-target traffic returns through `sigb`;
 - the operator CR must set `acceptPolicy.underlayCIDRs` to the external

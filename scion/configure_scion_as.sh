@@ -28,9 +28,16 @@ command -v envsubst >/dev/null || sudo dnf install -y gettext
 sudo mkdir -p "${SCION_DIR}"/{as-a,as-b,gen}
 sudo chown -R "${USER}:${GROUP}" "${SCION_DIR}"
 
+# Resolve a branch or tag to its current commit so the registrar build layer
+# is rebuilt when the ref moves; an unchanged build-arg would otherwise reuse
+# a cached clone that may predate the registrar's TLS flags.
+SCION_OPERATOR_COMMIT="$(git ls-remote https://github.com/mkowalski/scion-k8s-operator \
+    "${SCION_OPERATOR_REF}" | awk 'NR==1 {print $1}' || true)"
+SCION_OPERATOR_COMMIT="${SCION_OPERATOR_COMMIT:-${SCION_OPERATOR_REF}}"
+
 sudo podman build -t "${SCION_IMAGE}" \
     --build-arg "SCION_VERSION=${SCION_VERSION}" \
-    --build-arg "SCION_OPERATOR_REF=${SCION_OPERATOR_REF}" \
+    --build-arg "SCION_OPERATOR_REF=${SCION_OPERATOR_COMMIT}" \
     "${scion_dir}"
 
 # Explicit variable list so stray $ in templates can never be substituted.
@@ -194,10 +201,18 @@ sudo chmod 600 "${SCION_DIR}/token"
 # The registrar serves HTTPS so the bearer token never crosses the underlay in
 # plaintext. The self-signed certificate is kept across re-runs (like the
 # token); the operator pins it through the "ca.crt" key of its credentials
-# secret (REGISTRAR_CA in scion-k8s-operator's e2e suite).
+# secret (REGISTRAR_CA in scion-k8s-operator's e2e suite). It is re-minted
+# when the key is missing, it expires within a day, or it no longer matches
+# the AS host address.
 SCION_REGISTRAR_TLS_DIR="${SCION_DIR}/registrar-tls"
-if [[ ! -f "${SCION_REGISTRAR_TLS_DIR}/tls.crt" ]]; then
-    command -v openssl >/dev/null || sudo dnf install -y openssl
+command -v openssl >/dev/null || sudo dnf install -y openssl
+scion_registrar_cert_new=""
+if [[ ! -s "${SCION_REGISTRAR_TLS_DIR}/tls.key" ]] || \
+   ! openssl x509 -in "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -noout \
+        -checkend 86400 >/dev/null 2>&1 || \
+   ! openssl x509 -in "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -noout \
+        -checkip "${SCION_HOST_IP}" 2>/dev/null | grep -q "does match certificate"; then
+    scion_registrar_cert_new=true
     mkdir -p "${SCION_REGISTRAR_TLS_DIR}"
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
         -days 365 -subj "/CN=scion-registrar" \
@@ -315,9 +330,9 @@ for _ in $(seq 12); do
 done
 curl -fsS "http://${SCION_HOST_IP}:8041/topology" | grep -q "${SCION_ISD_AS_A}"
 # no -f: a 401 status is the expected outcome here
-curl -sS --cacert "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -o /dev/null -w '%{http_code}' \
+curl -sS --noproxy '*' --cacert "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -o /dev/null -w '%{http_code}' \
     "https://${SCION_HOST_IP}:8642/v1/sigs" | grep -q 401
-curl -fsS --cacert "${SCION_REGISTRAR_TLS_DIR}/tls.crt" \
+curl -fsS --noproxy '*' --cacert "${SCION_REGISTRAR_TLS_DIR}/tls.crt" \
     -H "Authorization: Bearer ${SCION_REGISTRAR_TOKEN}" "https://${SCION_HOST_IP}:8642/v1/sigs" >/dev/null
 for c in scion-cs-a scion-br-a scion-dispatcher-a scion-cs-b scion-br-b scion-daemon-b scion-sig-b scion-discovery scion-registrar scion-remote-echo; do
     sudo podman inspect -f '{{.State.Running}}' "$c" | grep -q true
@@ -336,3 +351,7 @@ SCION topology ready:
   REMOTE_PING_IP=${REMOTE_PING_IP}
   REMOTE_TCP_PORT=${SCION_REMOTE_TCP_PORT}
 EOF
+if [[ -n "${scion_registrar_cert_new}" ]]; then
+    echo "The registrar certificate was (re)generated: refresh any pinned copy" \
+         "(the ca.crt key of the operator's credentials secret)."
+fi
