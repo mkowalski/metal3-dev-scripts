@@ -190,6 +190,23 @@ else
 fi
 sudo chmod 600 "${SCION_DIR}/token"
 
+# --- registrar TLS -----------------------------------------------------------
+# The registrar serves HTTPS so the bearer token never crosses the underlay in
+# plaintext. The self-signed certificate is kept across re-runs (like the
+# token); the operator pins it through the "ca.crt" key of its credentials
+# secret (REGISTRAR_CA in scion-k8s-operator's e2e suite).
+SCION_REGISTRAR_TLS_DIR="${SCION_DIR}/registrar-tls"
+if [[ ! -f "${SCION_REGISTRAR_TLS_DIR}/tls.crt" ]]; then
+    command -v openssl >/dev/null || sudo dnf install -y openssl
+    mkdir -p "${SCION_REGISTRAR_TLS_DIR}"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+        -days 365 -subj "/CN=scion-registrar" \
+        -addext "subjectAltName=IP:${SCION_HOST_IP}" \
+        -keyout "${SCION_REGISTRAR_TLS_DIR}/tls.key" \
+        -out "${SCION_REGISTRAR_TLS_DIR}/tls.crt"
+    chmod 600 "${SCION_REGISTRAR_TLS_DIR}/tls.key"
+fi
+
 # --- remote ping target ------------------------------------------------------
 # Dummy interface on the host carrying an address from SCION_REMOTE_PREFIX;
 # sig-b routes the prefix through its tun.
@@ -260,9 +277,11 @@ sudo systemctl enable --now podman.socket
 sudo podman run -d --replace --name scion-registrar --net host \
     -v "${SCION_DIR}/as-a:/data:z" \
     -v /run/podman/podman.sock:/run/podman/podman.sock \
+    -v "${SCION_REGISTRAR_TLS_DIR}:/tls:ro,z" \
     -e "REGISTRAR_TOKEN=${SCION_REGISTRAR_TOKEN}" \
     --entrypoint scion-registrar "${SCION_IMAGE}" \
     -topology /data/topology.json -listen "${SCION_HOST_IP}:8642" \
+    -tls-cert /tls/tls.crt -tls-key /tls/tls.key \
     -reload-cmd "curl -fsS --unix-socket /run/podman/podman.sock -X POST http://d/containers/scion-cs-a/kill?signal=SIGHUP"
 
 # --- firewall -----------------------------------------------------------------
@@ -296,8 +315,10 @@ for _ in $(seq 12); do
 done
 curl -fsS "http://${SCION_HOST_IP}:8041/topology" | grep -q "${SCION_ISD_AS_A}"
 # no -f: a 401 status is the expected outcome here
-curl -sS -o /dev/null -w '%{http_code}' "http://${SCION_HOST_IP}:8642/v1/sigs" | grep -q 401
-curl -fsS -H "Authorization: Bearer ${SCION_REGISTRAR_TOKEN}" "http://${SCION_HOST_IP}:8642/v1/sigs" >/dev/null
+curl -sS --cacert "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -o /dev/null -w '%{http_code}' \
+    "https://${SCION_HOST_IP}:8642/v1/sigs" | grep -q 401
+curl -fsS --cacert "${SCION_REGISTRAR_TLS_DIR}/tls.crt" \
+    -H "Authorization: Bearer ${SCION_REGISTRAR_TOKEN}" "https://${SCION_HOST_IP}:8642/v1/sigs" >/dev/null
 for c in scion-cs-a scion-br-a scion-dispatcher-a scion-cs-b scion-br-b scion-daemon-b scion-sig-b scion-discovery scion-registrar scion-remote-echo; do
     sudo podman inspect -f '{{.State.Running}}' "$c" | grep -q true
 done
@@ -308,7 +329,8 @@ done
 cat <<EOF
 SCION topology ready:
   DISCOVERY_URL=http://${SCION_HOST_IP}:8041
-  REGISTRAR_URL=http://${SCION_HOST_IP}:8642
+  REGISTRAR_URL=https://${SCION_HOST_IP}:8642
+  REGISTRAR_CA=${SCION_REGISTRAR_TLS_DIR}/tls.crt
   REGISTRAR_TOKEN=${SCION_REGISTRAR_TOKEN}
   REMOTE_ISD_AS=${SCION_ISD_AS_B}
   REMOTE_PING_IP=${REMOTE_PING_IP}
