@@ -270,7 +270,8 @@ The topology separates test data from AS control traffic:
   `${WORKING_DIR}/scion/registrar-tls/`; pass the printed `REGISTRAR_CA` path
   to the e2e suite so the operator pins it (needs scion-k8s-operator at
   `d4f1ee9` or later; older suites ignore `REGISTRAR_CA` and cannot verify
-  the certificate);
+  the certificate). If the host sets `HTTPS_PROXY`, add the registrar address
+  to `NO_PROXY` when running the suite, which does not bypass proxies itself;
 - rule/table 31050 returns traffic sourced by the AS host over the original
   underlay, while remote-target traffic returns through `sigb`;
 - the operator CR must set `acceptPolicy.underlayCIDRs` to the external

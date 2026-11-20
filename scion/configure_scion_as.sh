@@ -202,17 +202,19 @@ sudo chmod 600 "${SCION_DIR}/token"
 # plaintext. The self-signed certificate is kept across re-runs (like the
 # token); the operator pins it through the "ca.crt" key of its credentials
 # secret (REGISTRAR_CA in scion-k8s-operator's e2e suite). It is re-minted
-# when the key is missing, it expires within a day, or it no longer matches
-# the AS host address.
+# when the key is missing or does not belong to the certificate, the
+# certificate expires within a day, or it no longer matches the AS host
+# address.
 SCION_REGISTRAR_TLS_DIR="${SCION_DIR}/registrar-tls"
 command -v openssl >/dev/null || sudo dnf install -y openssl
-scion_registrar_cert_new=""
+scion_registrar_pubkey() { openssl "$@" 2>/dev/null | sha256sum; }
 if [[ ! -s "${SCION_REGISTRAR_TLS_DIR}/tls.key" ]] || \
+   [[ "$(scion_registrar_pubkey pkey -in "${SCION_REGISTRAR_TLS_DIR}/tls.key" -pubout)" != \
+      "$(scion_registrar_pubkey x509 -in "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -noout -pubkey)" ]] || \
    ! openssl x509 -in "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -noout \
         -checkend 86400 >/dev/null 2>&1 || \
    ! openssl x509 -in "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -noout \
         -checkip "${SCION_HOST_IP}" 2>/dev/null | grep -q "does match certificate"; then
-    scion_registrar_cert_new=true
     mkdir -p "${SCION_REGISTRAR_TLS_DIR}"
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
         -days 365 -subj "/CN=scion-registrar" \
@@ -351,7 +353,7 @@ SCION topology ready:
   REMOTE_PING_IP=${REMOTE_PING_IP}
   REMOTE_TCP_PORT=${SCION_REMOTE_TCP_PORT}
 EOF
-if [[ -n "${scion_registrar_cert_new}" ]]; then
-    echo "The registrar certificate was (re)generated: refresh any pinned copy" \
-         "(the ca.crt key of the operator's credentials secret)."
-fi
+# Printed on every run: a re-mint may have happened in an earlier, failed run.
+echo "Registrar certificate SHA-256 fingerprint:" \
+    "$(openssl x509 -in "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -noout -fingerprint -sha256 | cut -d= -f2)"
+echo "If an operator already pins another certificate, refresh the ca.crt key of its credentials secret."
