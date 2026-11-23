@@ -31,8 +31,16 @@ sudo chown -R "${USER}:${GROUP}" "${SCION_DIR}"
 # Resolve a branch or tag to its current commit so the registrar build layer
 # is rebuilt when the ref moves; an unchanged build-arg would otherwise reuse
 # a cached clone that may predate the registrar's TLS flags.
+# Full ref names only: a bare name also matches refs that merely end in it
+# (main matches refs/heads/dev/main). Prefer the branch, then the commit an
+# annotated tag points to, then a lightweight tag.
 SCION_OPERATOR_COMMIT="$(git ls-remote https://github.com/mkowalski/scion-k8s-operator \
-    "${SCION_OPERATOR_REF}" | awk 'NR==1 {print $1}' || true)"
+    "refs/heads/${SCION_OPERATOR_REF}" "refs/tags/${SCION_OPERATOR_REF}^{}" \
+    "refs/tags/${SCION_OPERATOR_REF}" | awk -v ref="${SCION_OPERATOR_REF}" '
+        $2 == "refs/heads/" ref     { branch = $1 }
+        $2 == "refs/tags/" ref "^{}" { peeled = $1 }
+        $2 == "refs/tags/" ref      { tag = $1 }
+        END { if (branch) print branch; else if (peeled) print peeled; else print tag }' || true)"
 SCION_OPERATOR_COMMIT="${SCION_OPERATOR_COMMIT:-${SCION_OPERATOR_REF}}"
 
 sudo podman build -t "${SCION_IMAGE}" \
