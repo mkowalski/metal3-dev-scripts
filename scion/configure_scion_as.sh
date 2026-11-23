@@ -28,9 +28,24 @@ command -v envsubst >/dev/null || sudo dnf install -y gettext
 sudo mkdir -p "${SCION_DIR}"/{as-a,as-b,gen}
 sudo chown -R "${USER}:${GROUP}" "${SCION_DIR}"
 
+# Resolve a branch or tag to its current commit so the registrar build layer
+# is rebuilt when the ref moves; an unchanged build-arg would otherwise reuse
+# a cached clone that may predate the registrar's TLS flags.
+# Full ref names only: a bare name also matches refs that merely end in it
+# (main matches refs/heads/dev/main). Prefer the branch, then the commit an
+# annotated tag points to, then a lightweight tag.
+SCION_OPERATOR_COMMIT="$(git ls-remote https://github.com/mkowalski/scion-k8s-operator \
+    "refs/heads/${SCION_OPERATOR_REF}" "refs/tags/${SCION_OPERATOR_REF}^{}" \
+    "refs/tags/${SCION_OPERATOR_REF}" | awk -v ref="${SCION_OPERATOR_REF}" '
+        $2 == "refs/heads/" ref     { branch = $1 }
+        $2 == "refs/tags/" ref "^{}" { peeled = $1 }
+        $2 == "refs/tags/" ref      { tag = $1 }
+        END { if (branch) print branch; else if (peeled) print peeled; else print tag }' || true)"
+SCION_OPERATOR_COMMIT="${SCION_OPERATOR_COMMIT:-${SCION_OPERATOR_REF}}"
+
 sudo podman build -t "${SCION_IMAGE}" \
     --build-arg "SCION_VERSION=${SCION_VERSION}" \
-    --build-arg "SCION_OPERATOR_REF=${SCION_OPERATOR_REF}" \
+    --build-arg "SCION_OPERATOR_REF=${SCION_OPERATOR_COMMIT}" \
     "${scion_dir}"
 
 # Explicit variable list so stray $ in templates can never be substituted.
@@ -190,6 +205,33 @@ else
 fi
 sudo chmod 600 "${SCION_DIR}/token"
 
+# --- registrar TLS -----------------------------------------------------------
+# The registrar serves HTTPS so the bearer token never crosses the underlay in
+# plaintext. The self-signed certificate is kept across re-runs (like the
+# token); the operator pins it through the "ca.crt" key of its credentials
+# secret (REGISTRAR_CA in scion-k8s-operator's e2e suite). It is re-minted
+# when the key is missing or does not belong to the certificate, the
+# certificate expires within a day, or it no longer matches the AS host
+# address.
+SCION_REGISTRAR_TLS_DIR="${SCION_DIR}/registrar-tls"
+command -v openssl >/dev/null || sudo dnf install -y openssl
+scion_registrar_pubkey() { openssl "$@" 2>/dev/null | sha256sum; }
+if [[ ! -s "${SCION_REGISTRAR_TLS_DIR}/tls.key" ]] || \
+   [[ "$(scion_registrar_pubkey pkey -in "${SCION_REGISTRAR_TLS_DIR}/tls.key" -pubout)" != \
+      "$(scion_registrar_pubkey x509 -in "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -noout -pubkey)" ]] || \
+   ! openssl x509 -in "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -noout \
+        -checkend 86400 >/dev/null 2>&1 || \
+   ! openssl x509 -in "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -noout \
+        -checkip "${SCION_HOST_IP}" 2>/dev/null | grep -q "does match certificate"; then
+    mkdir -p "${SCION_REGISTRAR_TLS_DIR}"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+        -days 365 -subj "/CN=scion-registrar" \
+        -addext "subjectAltName=IP:${SCION_HOST_IP}" \
+        -keyout "${SCION_REGISTRAR_TLS_DIR}/tls.key" \
+        -out "${SCION_REGISTRAR_TLS_DIR}/tls.crt"
+    chmod 600 "${SCION_REGISTRAR_TLS_DIR}/tls.key"
+fi
+
 # --- remote ping target ------------------------------------------------------
 # Dummy interface on the host carrying an address from SCION_REMOTE_PREFIX;
 # sig-b routes the prefix through its tun.
@@ -260,9 +302,11 @@ sudo systemctl enable --now podman.socket
 sudo podman run -d --replace --name scion-registrar --net host \
     -v "${SCION_DIR}/as-a:/data:z" \
     -v /run/podman/podman.sock:/run/podman/podman.sock \
+    -v "${SCION_REGISTRAR_TLS_DIR}:/tls:ro,z" \
     -e "REGISTRAR_TOKEN=${SCION_REGISTRAR_TOKEN}" \
     --entrypoint scion-registrar "${SCION_IMAGE}" \
     -topology /data/topology.json -listen "${SCION_HOST_IP}:8642" \
+    -tls-cert /tls/tls.crt -tls-key /tls/tls.key \
     -reload-cmd "curl -fsS --unix-socket /run/podman/podman.sock -X POST http://d/containers/scion-cs-a/kill?signal=SIGHUP"
 
 # --- firewall -----------------------------------------------------------------
@@ -296,8 +340,10 @@ for _ in $(seq 12); do
 done
 curl -fsS "http://${SCION_HOST_IP}:8041/topology" | grep -q "${SCION_ISD_AS_A}"
 # no -f: a 401 status is the expected outcome here
-curl -sS -o /dev/null -w '%{http_code}' "http://${SCION_HOST_IP}:8642/v1/sigs" | grep -q 401
-curl -fsS -H "Authorization: Bearer ${SCION_REGISTRAR_TOKEN}" "http://${SCION_HOST_IP}:8642/v1/sigs" >/dev/null
+curl -sS --noproxy '*' --cacert "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -o /dev/null -w '%{http_code}' \
+    "https://${SCION_HOST_IP}:8642/v1/sigs" | grep -q 401
+curl -fsS --noproxy '*' --cacert "${SCION_REGISTRAR_TLS_DIR}/tls.crt" \
+    -H "Authorization: Bearer ${SCION_REGISTRAR_TOKEN}" "https://${SCION_HOST_IP}:8642/v1/sigs" >/dev/null
 for c in scion-cs-a scion-br-a scion-dispatcher-a scion-cs-b scion-br-b scion-daemon-b scion-sig-b scion-discovery scion-registrar scion-remote-echo; do
     sudo podman inspect -f '{{.State.Running}}' "$c" | grep -q true
 done
@@ -308,9 +354,14 @@ done
 cat <<EOF
 SCION topology ready:
   DISCOVERY_URL=http://${SCION_HOST_IP}:8041
-  REGISTRAR_URL=http://${SCION_HOST_IP}:8642
+  REGISTRAR_URL=https://${SCION_HOST_IP}:8642
+  REGISTRAR_CA=${SCION_REGISTRAR_TLS_DIR}/tls.crt
   REGISTRAR_TOKEN=${SCION_REGISTRAR_TOKEN}
   REMOTE_ISD_AS=${SCION_ISD_AS_B}
   REMOTE_PING_IP=${REMOTE_PING_IP}
   REMOTE_TCP_PORT=${SCION_REMOTE_TCP_PORT}
 EOF
+# Printed on every run: a re-mint may have happened in an earlier, failed run.
+echo "Registrar certificate SHA-256 fingerprint:" \
+    "$(openssl x509 -in "${SCION_REGISTRAR_TLS_DIR}/tls.crt" -noout -fingerprint -sha256 | cut -d= -f2)"
+echo "If an operator already pins another certificate, refresh the ca.crt key of its credentials secret."
